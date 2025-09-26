@@ -1,0 +1,107 @@
+stages:
+  - setup
+  - build
+  - deploy
+
+setup_app_roles:
+  stage: setup
+  image: python:3.12-slim
+  script:
+    - apt-get update && apt-get install -y curl gnupg lsb-release
+    - curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+    - pip install --no-cache-dir azure-appconfiguration azure-identity
+    - az login --service-principal -u "$AZURE_IAC_CLIENT_ID" -p "$AZURE_IAC_CLIENT_SECRET" --tenant "$AZURE_IAC_TENANT_ID"
+    - >-
+      python scripts/manage_app_config_roles.py
+      --file config/users.json
+      --endpoint "https://appconfig-yoshi.azconfig.io"
+      --remove-missing
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"
+      changes:
+        - config/users.json
+        - scripts/manage_app_config_roles.py
+      when: always
+
+build_and_push_image:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  variables:
+    AZURE_CLIENT_ID: $AZURE_IAC_CLIENT_ID
+    AZURE_CLIENT_SECRET: $AZURE_IAC_CLIENT_SECRET
+    AZURE_TENANT_ID: $AZURE_IAC_TENANT_ID
+    ACR_NAME: "acryoshi"
+  script:
+    - mkdir -p /kaniko/.docker
+    - |
+      echo '{
+        "auths": {
+          "https://acryoshi.azurecr.io": {
+            "username": "'$AZURE_IAC_CLIENT_ID'",
+            "password": "'$AZURE_IAC_CLIENT_SECRET'"
+          }
+        }
+      }' > /kaniko/.docker/config.json
+    - >-
+      /kaniko/executor
+      --context $CI_PROJECT_DIR
+      --dockerfile $CI_PROJECT_DIR/Dockerfile
+      --destination acryoshi.azurecr.io/streamlit-auth-app:latest
+      --destination acryoshi.azurecr.io/streamlit-auth-app:${CI_COMMIT_SHORT_SHA}
+      --label org.opencontainers.image.created="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+      --label org.opencontainers.image.revision="${CI_COMMIT_SHA}"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"
+      changes:
+        - auth/**
+        - user_app/**
+        - .gitlab-ci.yml
+        - Dockerfile
+        - streamlit_app.py
+        - requirements.txt
+      when: always
+
+deploy_to_webapp:
+  stage: deploy
+  image: mcr.microsoft.com/azure-cli
+  needs:
+    - build_and_push_image
+  variables:
+    WEBAPP_NAME: "webapp-yoshi"
+    RESOURCE_GROUP: "rg-yoshi"
+    ACR_NAME: "acryoshi"
+  script:
+    - az login --service-principal -u "$AZURE_IAC_CLIENT_ID" -p "$AZURE_IAC_CLIENT_SECRET" --tenant "$AZURE_IAC_TENANT_ID"
+    - |
+      echo "Updating Web App to use the latest image..."
+      az webapp config container set \
+        --name $WEBAPP_NAME \
+        --resource-group $RESOURCE_GROUP \
+        --container-image-name "$ACR_NAME.azurecr.io/streamlit-auth-app:${CI_COMMIT_SHORT_SHA}" \
+        --container-registry-url "https://$ACR_NAME.azurecr.io" \
+        --container-registry-user "$AZURE_IAC_CLIENT_ID" \
+        --container-registry-password "$AZURE_IAC_CLIENT_SECRET"
+    - |
+      echo "Restarting Web App to apply changes..."
+      az webapp restart --name $WEBAPP_NAME --resource-group $RESOURCE_GROUP
+    - |
+      echo "Verifying deployment..."
+      SITE_URL=$(az webapp show --name $WEBAPP_NAME --resource-group $RESOURCE_GROUP --query defaultHostName -o tsv)
+      echo "Web app deployed at: https://$SITE_URL"
+
+      # Display container information
+      echo "test"
+      echo "Container details:"
+      az webapp config container show --name $WEBAPP_NAME --resource-group $RESOURCE_GROUP --output table
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"
+      changes:
+        - auth/**
+        - user_app/**
+        - .gitlab-ci.yml
+        - Dockerfile
+        - streamlit_app.py
+        - requirements.txt
+      when: always

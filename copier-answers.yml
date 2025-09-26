@@ -1,0 +1,8 @@
+# Changes here will be overwritten by Copier
+_commit: 2fe54fe
+_src_path: git@gitlab.com:denis_fan/streamlit/streamlit-app-creator/src.git
+azure_appconfig_endpoint: https://appconfig-yoshi.azconfig.io
+azure_container_registry_name: acryoshi
+docker_image_name: streamlit-auth-app
+resource_group: rg-yoshi
+webapp_name: webapp-yoshi
